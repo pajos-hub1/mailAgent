@@ -1,0 +1,19 @@
+# Core Python Libraries
+python-dotenv==0.21.0
+asyncio==3.4.3
+
+# Gmail API
+google-auth-oauthlib==1.0.0
+google-api-python-client==2.70.0
+
+# Machine Learning and NLP
+transformers
+torch
+sentencepiece
+
+# Logging
+structlog==22.1.0
+
+# Optional dependencies
+# Install with: pip install -r requirements.txt
+reflex==0.7.12

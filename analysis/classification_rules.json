@@ -1,0 +1,100 @@
+{
+    "keyword_rules": {
+        "suspicious": {
+            "subject": ["urgent", "verify", "account", "security", "bank", "password", "alert", "update required"],
+            "body": [
+                "click here",
+                "limited time",
+                "act now",
+                "your account has been",
+                "verify your",
+                "unauthorized access",
+                "suspicious activity",
+                "security alert"
+            ]
+        },
+        "newsletter": {
+            "subject": [
+                "newsletter",
+                "weekly update",
+                "digest",
+                "monthly report",
+                "latest news",
+                "product updates"
+            ],
+            "body": [
+                "unsubscribe",
+                "subscription",
+                "newsletter",
+                "view in browser",
+                "manage preferences",
+                "privacy policy"
+            ]
+        },
+        "important": {
+            "subject": [
+                "urgent",
+                "important",
+                "deadline",
+                "meeting",
+                "attention required",
+                "action needed",
+                "project update",
+                "critical issue"
+            ],
+            "from": [
+                "boss@company.com",
+                "hr@company.com",
+                "ceo@",
+                "manager@",
+                "director@",
+                "support@"
+            ]
+        },
+        "personal": {
+            "from_domains": [
+                "gmail.com",
+                "yahoo.com",
+                "hotmail.com",
+                "outlook.com",
+                "aol.com",
+                "icloud.com"
+            ]
+        },
+        "low-priority": {
+            "subject": [
+                "sale",
+                "discount",
+                "offer",
+                "promotion",
+                "limited time",
+                "exclusive deal",
+                "invitation",
+                "webinar"
+            ],
+            "from": [
+                "marketing@",
+                "noreply@",
+                "donotreply@",
+                "info@",
+                "hello@",
+                "newsletter@",
+                "promotions@"
+            ]
+        }
+    },
+    "confidence_thresholds": {
+        "suspicious": 0.75,
+        "newsletter": 0.8,
+        "important": 0.75,
+        "personal": 0.65,
+        "low-priority": 0.7
+    },
+    "priority_order": [
+        "suspicious",
+        "important",
+        "personal",
+        "newsletter",
+        "low-priority"
+    ]
+}
