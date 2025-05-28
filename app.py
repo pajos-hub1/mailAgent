@@ -14,352 +14,11 @@ from collections import Counter, defaultdict
 
 # Import your existing modules
 try:
-    from email_fetch.fetcher import EmailFetcher
-    from analysis.classifier import EmailClassifier
-    from notify.notifier import TwilioNotifier
+    from email_agent import EmailMonitoringAgent  # Import the new agent
     from utils.helpers import setup_logging
 except ImportError as e:
     st.error(f"Import error: {e}")
     st.stop()
-
-
-class StreamlitEmailAgent:
-    def __init__(self):
-        # Only initialize once per session
-        if hasattr(self, '_initialized'):
-            return
-
-        try:
-            # Load environment variables
-            load_dotenv(os.path.join('config', 'credentials.env'))
-
-            # Setup logging with streamlit-friendly config
-            logging.basicConfig(
-                level=logging.INFO,
-                format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                handlers=[logging.StreamHandler(sys.stdout)]
-            )
-            self.logger = logging.getLogger(__name__)
-
-            # Initialize components with error handling
-            self.fetcher = None
-            self.classifier = None
-            self.notifier = None
-
-            # Initialize email fetcher
-            try:
-                self.fetcher = EmailFetcher()
-                self.logger.info("Email fetcher initialized successfully")
-            except Exception as e:
-                self.logger.error(f"Email fetcher failed to initialize: {e}")
-                st.error(f"Failed to initialize email fetcher: {e}")
-
-            # Initialize classifier
-            try:
-                self.classifier = EmailClassifier()
-                self.logger.info("Email classifier initialized successfully")
-            except Exception as e:
-                self.logger.error(f"Email classifier failed to initialize: {e}")
-                st.warning(f"Email classifier failed to initialize: {e}. Using basic classification.")
-
-            # Initialize Twilio notifier
-            try:
-                self.notifier = TwilioNotifier()
-                self.logger.info("Twilio notifier initialized successfully")
-            except Exception as e:
-                self.logger.error(f"Twilio notifier failed to initialize: {e}")
-                st.warning(f"SMS notifications disabled: {e}")
-
-            # Configure polling interval
-            self.polling_interval = int(os.getenv('POLLING_INTERVAL', 30))  # Increased default
-
-            self._initialized = True
-
-        except Exception as e:
-            self.logger.error(f"Agent initialization failed: {e}")
-            st.error(f"Agent initialization failed: {e}")
-
-    def basic_classify(self, email):
-        """Basic classification fallback when ML classifier fails"""
-        subject = email.get('subject', '').lower()
-        body = email.get('body', '').lower()
-        from_addr = email.get('from', '').lower()
-
-        # Simple keyword-based classification
-        important_keywords = ['urgent', 'important', 'asap', 'critical', 'deadline']
-        suspicious_keywords = ['virus', 'malware', 'phishing', 'scam', 'suspicious', 'click here', 'verify account']
-
-        text_to_check = f"{subject} {body} {from_addr}"
-
-        if any(keyword in text_to_check for keyword in suspicious_keywords):
-            return {'category': 'Suspicious', 'confidence': 0.7}
-        elif any(keyword in text_to_check for keyword in important_keywords):
-            return {'category': 'Important', 'confidence': 0.6}
-        else:
-            return {'category': 'Normal', 'confidence': 0.5}
-
-    async def process_new_emails(self):
-        """Process only new emails in the inbox"""
-        if not self.fetcher:
-            self.add_log("Email fetcher not available")
-            return []
-
-        try:
-            # Run the async function in a way that works with Streamlit
-            new_emails = await self.fetcher.fetch_new_emails()
-
-            if not new_emails:
-                self.add_log("No new emails found.")
-                return []
-
-            self.add_log(f"{len(new_emails)} new email(s) found.")
-
-            # Process all emails
-            processed_emails = []
-
-            for email in new_emails:
-                try:
-                    # Use classifier if available, otherwise use basic classification
-                    if self.classifier:
-                        classification = self.classifier.classify(email)
-                    else:
-                        classification = self.basic_classify(email)
-
-                    email_data = {
-                        'timestamp': datetime.now(),
-                        'from': email.get('from', 'Unknown Sender'),
-                        'subject': email.get('subject', 'No Subject'),
-                        'category': classification.get('category', 'Unknown'),
-                        'confidence': classification.get('confidence', 0.0),
-                        'body_preview': email.get('body', '')[:100] + '...' if email.get('body') else ''
-                    }
-
-                    processed_emails.append(email_data)
-
-                    # Update counters
-                    st.session_state.total_emails += 1
-                    category = classification.get('category', '').lower()
-                    if category == 'important':
-                        st.session_state.important_count += 1
-                    elif category == 'suspicious':
-                        st.session_state.suspicious_count += 1
-
-                    # Send notification if needed (non-blocking)
-                    if category in ['important', 'suspicious'] and self.notifier:
-                        try:
-                            # Create task but don't await it to avoid blocking
-                            asyncio.create_task(self._send_notification(email, classification))
-                        except Exception as e:
-                            self.add_log(f"Error creating notification task: {str(e)}")
-
-                except Exception as e:
-                    self.logger.error(f"Error classifying email: {e}")
-                    self.add_log(f"Error processing email: {str(e)}")
-                    continue
-
-            # Add to session state
-            st.session_state.emails_processed.extend(processed_emails)
-            st.session_state.last_check_time = datetime.now()
-
-            return processed_emails
-
-        except Exception as e:
-            self.logger.error(f"Error in email processing: {e}")
-            self.add_log(f"Error in email processing: {str(e)}")
-            return []
-
-    async def _send_notification(self, email, classification):
-        """Send SMS notification if needed"""
-        if not self.notifier:
-            return
-
-        try:
-            category = classification.get('category', '').lower()
-            success = await asyncio.wait_for(
-                self.notifier.send_notification(email, category),
-                timeout=15.0
-            )
-
-            if success:
-                self.add_log(f"📱 SMS sent for {category} email from {email.get('from', 'Unknown')}")
-            else:
-                self.add_log(f"Failed to send SMS for {category} email")
-
-        except asyncio.TimeoutError:
-            self.add_log(f"SMS notification timed out for {category} email")
-        except Exception as e:
-            self.logger.error(f"Error sending notification: {e}")
-            self.add_log(f"Error sending notification: {str(e)}")
-
-    def add_log(self, message):
-        """Add a log message to session state"""
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        log_entry = f"[{timestamp}] {message}"
-        st.session_state.log_messages.append(log_entry)
-        # Keep only last 50 log messages
-        if len(st.session_state.log_messages) > 50:
-            st.session_state.log_messages = st.session_state.log_messages[-50:]
-
-    async def test_sms(self):
-        """Test SMS functionality"""
-        if not self.notifier:
-            return False, "SMS notifications not configured"
-
-        try:
-            success = await asyncio.wait_for(
-                self.notifier.send_test_sms(),
-                timeout=15.0
-            )
-            if success:
-                return True, "Test SMS sent successfully!"
-            else:
-                return False, "Test SMS failed"
-        except asyncio.TimeoutError:
-            return False, "Test SMS timed out"
-        except Exception as e:
-            return False, f"Test SMS error: {str(e)}"
-
-    def generate_weekly_summary(self, emails_data: List[Dict], start_date: datetime = None):
-        """Generate a comprehensive weekly summary of email activity"""
-        if not emails_data:
-            return {
-                'total_emails': 0,
-                'summary': "No emails processed this week.",
-                'details': {}
-            }
-
-        # Default to last 7 days if no start date provided
-        if start_date is None:
-            start_date = datetime.now() - timedelta(days=7)
-
-        end_date = start_date + timedelta(days=7)
-
-        # Filter emails for the week
-        week_emails = [
-            email for email in emails_data
-            if start_date <= email['timestamp'] <= end_date
-        ]
-
-        if not week_emails:
-            return {
-                'total_emails': 0,
-                'summary': f"No emails processed between {start_date.strftime('%Y-%m-%d')} and {end_date.strftime('%Y-%m-%d')}.",
-                'details': {}
-            }
-
-        # Basic statistics
-        total_emails = len(week_emails)
-        categories = [email['category'] for email in week_emails]
-        category_counts = Counter(categories)
-
-        # Sender analysis
-        senders = [email['from'] for email in week_emails]
-        sender_counts = Counter(senders)
-        top_senders = sender_counts.most_common(5)
-
-        # Daily breakdown
-        daily_counts = defaultdict(int)
-        daily_categories = defaultdict(lambda: defaultdict(int))
-
-        for email in week_emails:
-            day = email['timestamp'].strftime('%Y-%m-%d')
-            daily_counts[day] += 1
-            daily_categories[day][email['category']] += 1
-
-        # Time analysis
-        hourly_distribution = defaultdict(int)
-        for email in week_emails:
-            hour = email['timestamp'].hour
-            hourly_distribution[hour] += 1
-
-        # Peak hour
-        peak_hour = max(hourly_distribution.items(), key=lambda x: x[1]) if hourly_distribution else (0, 0)
-
-        # Risk analysis
-        important_emails = [email for email in week_emails if email['category'].lower() == 'important']
-        suspicious_emails = [email for email in week_emails if email['category'].lower() == 'suspicious']
-
-        # Confidence analysis
-        avg_confidence = sum(email['confidence'] for email in week_emails) / len(week_emails)
-        high_confidence = len([email for email in week_emails if email['confidence'] > 0.8])
-        low_confidence = len([email for email in week_emails if email['confidence'] < 0.5])
-
-        # Generate summary text
-        summary_parts = []
-        summary_parts.append(
-            f"📊 **Weekly Email Summary ({start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')})**")
-        summary_parts.append(f"Total emails processed: **{total_emails}**")
-
-        if category_counts:
-            summary_parts.append("\n**Category Breakdown:**")
-            for category, count in category_counts.most_common():
-                percentage = (count / total_emails) * 100
-                summary_parts.append(f"• {category}: {count} emails ({percentage:.1f}%)")
-
-        if important_emails:
-            summary_parts.append(f"\n🔥 **{len(important_emails)} Important emails** requiring attention")
-
-        if suspicious_emails:
-            summary_parts.append(f"\n⚠️ **{len(suspicious_emails)} Suspicious emails** detected")
-
-        if top_senders:
-            summary_parts.append(f"\n📧 **Top Senders:**")
-            for sender, count in top_senders:
-                summary_parts.append(f"• {sender}: {count} emails")
-
-        summary_parts.append(f"\n⏰ **Peak Activity:** {peak_hour[0]:02d}:00 ({peak_hour[1]} emails)")
-        summary_parts.append(f"🎯 **Average Confidence:** {avg_confidence:.1%}")
-
-        if daily_counts:
-            busiest_day = max(daily_counts.items(), key=lambda x: x[1])
-            summary_parts.append(f"📅 **Busiest Day:** {busiest_day[0]} ({busiest_day[1]} emails)")
-
-        summary_text = "\n".join(summary_parts)
-
-        return {
-            'total_emails': total_emails,
-            'summary': summary_text,
-            'details': {
-                'category_counts': dict(category_counts),
-                'daily_counts': dict(daily_counts),
-                'daily_categories': dict(daily_categories),
-                'hourly_distribution': dict(hourly_distribution),
-                'top_senders': top_senders,
-                'important_emails': important_emails,
-                'suspicious_emails': suspicious_emails,
-                'avg_confidence': avg_confidence,
-                'high_confidence_count': high_confidence,
-                'low_confidence_count': low_confidence,
-                'peak_hour': peak_hour,
-                'date_range': (start_date, end_date)
-            }
-        }
-
-    def export_weekly_summary_csv(self, summary_data: Dict, emails_data: List[Dict]):
-        """Export weekly summary data to CSV format"""
-        if not summary_data or not emails_data:
-            return None
-
-        start_date, end_date = summary_data['details']['date_range']
-
-        # Filter emails for the week
-        week_emails = [
-            email for email in emails_data
-            if start_date <= email['timestamp'] <= end_date
-        ]
-
-        if not week_emails:
-            return None
-
-        # Create DataFrame
-        df = pd.DataFrame(week_emails)
-
-        # Add additional columns for analysis
-        df['date'] = df['timestamp'].dt.date
-        df['hour'] = df['timestamp'].dt.hour
-        df['day_of_week'] = df['timestamp'].dt.day_name()
-
-        return df
 
 
 def run_async_function(func):
@@ -394,11 +53,13 @@ def initialize_session_state():
         st.session_state.important_count = 0
     if 'suspicious_count' not in st.session_state:
         st.session_state.suspicious_count = 0
+    if 'malicious_count' not in st.session_state:
+        st.session_state.malicious_count = 0
     if 'log_messages' not in st.session_state:
         st.session_state.log_messages = []
     if 'agent' not in st.session_state:
         with st.spinner("Initializing Email Agent..."):
-            st.session_state.agent = StreamlitEmailAgent()
+            st.session_state.agent = EmailMonitoringAgent()  # Use the new agent
     if 'weekly_summary' not in st.session_state:
         st.session_state.weekly_summary = None
     if 'summary_date_range' not in st.session_state:
@@ -410,6 +71,69 @@ def safe_html_escape(text):
     if text is None:
         return "Unknown"
     return html.escape(str(text))
+
+
+def add_log(message):
+    """Add a log message to session state"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    log_entry = f"[{timestamp}] {message}"
+    st.session_state.log_messages.append(log_entry)
+    # Keep only last 50 log messages
+    if len(st.session_state.log_messages) > 50:
+        st.session_state.log_messages = st.session_state.log_messages[-50:]
+
+
+async def process_emails_for_streamlit():
+    """Wrapper function to process emails and update Streamlit session state"""
+    agent = st.session_state.agent
+
+    try:
+        # Process new emails
+        email_classifications = await agent.process_new_emails()
+
+        if not email_classifications:
+            add_log("No new emails found.")
+            return []
+
+        add_log(f"{len(email_classifications)} new email(s) found.")
+
+        # Update session state with processed emails
+        processed_emails = []
+        for email, classification in email_classifications:
+            email_data = {
+                'timestamp': datetime.now(),
+                'from': email.get('from', 'Unknown Sender'),
+                'subject': email.get('subject', 'No Subject'),
+                'category': classification.get('category', 'Unknown'),
+                'confidence': classification.get('confidence', 0.0),
+                'body_preview': email.get('body', '')[:100] + '...' if email.get('body') else '',
+                'threat_intelligence': classification.get('details', {}).get('threat_intelligence'),
+                'rule_matches': classification.get('details', {}).get('rule_matches', [])
+            }
+            processed_emails.append(email_data)
+
+            # Update counters in session state
+            st.session_state.total_emails += 1
+            category = classification.get('category', '').lower()
+            if category == 'important':
+                st.session_state.important_count += 1
+            elif category == 'suspicious':
+                st.session_state.suspicious_count += 1
+
+                # Check if it's malicious based on threat intelligence
+                threat_intel = classification.get('details', {}).get('threat_intelligence')
+                if threat_intel and threat_intel.get('is_malicious', False):
+                    st.session_state.malicious_count += 1
+
+        # Add to session state
+        st.session_state.emails_processed.extend(processed_emails)
+        st.session_state.last_check_time = datetime.now()
+
+        return processed_emails
+
+    except Exception as e:
+        add_log(f"Error in email processing: {str(e)}")
+        return []
 
 
 def main():
@@ -480,12 +204,14 @@ def main():
                     st.error("Email fetcher not available!")
                 else:
                     st.session_state.monitoring_active = True
+                    agent.monitoring_active = True
                     st.success("Monitoring started!")
                     st.rerun()
 
         with col2:
             if st.button("⏸️ Pause"):
                 st.session_state.monitoring_active = False
+                agent.pause_monitoring()
                 st.info("Monitoring paused")
                 st.rerun()
 
@@ -496,7 +222,7 @@ def main():
             else:
                 with st.spinner("Checking for new emails..."):
                     try:
-                        new_emails = run_async_function(agent.process_new_emails())
+                        new_emails = run_async_function(process_emails_for_streamlit())
                         if new_emails:
                             st.success(f"Found {len(new_emails)} new emails!")
                         else:
@@ -510,11 +236,11 @@ def main():
             if agent.notifier:
                 with st.spinner("Sending test SMS..."):
                     try:
-                        success, message = run_async_function(agent.test_sms())
+                        success = run_async_function(agent.test_sms())
                         if success:
-                            st.success(message)
+                            st.success("Test SMS sent successfully!")
                         else:
-                            st.error(message)
+                            st.error("Test SMS failed")
                     except Exception as e:
                         st.error(f"Error testing SMS: {e}")
             else:
@@ -544,6 +270,8 @@ def main():
             st.session_state.total_emails = 0
             st.session_state.important_count = 0
             st.session_state.suspicious_count = 0
+            st.session_state.malicious_count = 0
+            agent.clear_data()  # Also clear data in the agent
             st.success("Data cleared!")
             st.rerun()
 
@@ -552,7 +280,7 @@ def main():
 
     with tab1:
         # Statistics
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
 
         with col1:
             st.metric("Total Emails", st.session_state.total_emails)
@@ -564,6 +292,9 @@ def main():
             st.metric("Suspicious", st.session_state.suspicious_count)
 
         with col4:
+            st.metric("Malicious", st.session_state.malicious_count)
+
+        with col5:
             if st.session_state.last_check_time:
                 time_diff = datetime.now() - st.session_state.last_check_time
                 st.metric("Last Check", f"{int(time_diff.total_seconds())}s ago")
@@ -591,6 +322,27 @@ def main():
                     st.line_chart(hourly_counts)
                 else:
                     st.info("Need more emails for timeline chart")
+
+            # Threat Intelligence Summary
+            threat_summary = agent.get_threat_summary()
+            if threat_summary:
+                st.subheader("🛡️ Threat Intelligence Summary")
+
+                threat_col1, threat_col2, threat_col3 = st.columns(3)
+
+                with threat_col1:
+                    st.metric("Analyzed", threat_summary['total_analyzed'])
+
+                with threat_col2:
+                    st.metric("Malicious", threat_summary['malicious_count'])
+
+                with threat_col3:
+                    st.metric("Suspicious", threat_summary['suspicious_count'])
+
+                if threat_summary['threat_indicators']:
+                    st.write("**Top Threat Indicators:**")
+                    for indicator, count in threat_summary['threat_indicators']:
+                        st.write(f"• {indicator}: {count}")
         else:
             st.info("📭 No emails processed yet. Start monitoring or check manually to see analytics.")
 
@@ -648,6 +400,14 @@ def main():
                     bg_color = "#f0fbff"
                     icon = "📄"
                     category_color = "#48cae4"
+
+                # Check for malicious threat intelligence
+                threat_intel = email.get('threat_intelligence')
+                if threat_intel and threat_intel.get('is_malicious', False):
+                    border_color = "#dc3545"
+                    bg_color = "#f8d7da"
+                    icon = "🚨"
+                    category_color = "#dc3545"
 
                 # Safely escape HTML content
                 safe_subject = safe_html_escape(email['subject'])
@@ -721,8 +481,14 @@ def main():
                                             'subject': email['subject'],
                                             'body': email['body_preview']
                                         }
+
+                                        # Determine notification type
+                                        notification_type = category
+                                        if threat_intel and threat_intel.get('is_malicious', False):
+                                            notification_type = 'malicious'
+
                                         success = run_async_function(
-                                            agent.notifier.send_notification(mock_email, category)
+                                            agent.notifier.send_notification(mock_email, notification_type)
                                         )
                                         if success:
                                             st.success("SMS sent!")
@@ -758,8 +524,15 @@ def main():
                                 st.write("**Classification:**")
                                 st.write(f"• **Category:** {email['category']}")
                                 st.write(f"• **Confidence:** {email['confidence']:.2%}")
-                                st.write(
-                                    f"• **Risk Level:** {'High' if category in ['important', 'suspicious'] else 'Low'}")
+
+                                # Show threat intelligence if available
+                                if threat_intel:
+                                    st.write("**Threat Intelligence:**")
+                                    st.write(
+                                        f"• **Malicious:** {'Yes' if threat_intel.get('is_malicious', False) else 'No'}")
+                                    st.write(f"• **Risk Score:** {threat_intel.get('risk_score', 0.0):.2f}")
+                                    if threat_intel.get('threat_indicators'):
+                                        st.write(f"• **Indicators:** {', '.join(threat_intel['threat_indicators'])}")
 
                     st.markdown("<br>", unsafe_allow_html=True)
         else:
@@ -941,12 +714,14 @@ def main():
                     else:
                         st.info("No sender data available")
 
-                # Important and Suspicious emails sections
-                if summary['details']['important_emails'] or summary['details']['suspicious_emails']:
+                # Important, Suspicious, and Malicious emails sections
+                if (summary['details']['important_emails'] or
+                        summary['details']['suspicious_emails'] or
+                        summary['details'].get('malicious_emails')):
                     st.markdown("---")
                     st.subheader("🔍 Attention Required")
 
-                    alert_col1, alert_col2 = st.columns(2)
+                    alert_col1, alert_col2, alert_col3 = st.columns(3)
 
                     with alert_col1:
                         if summary['details']['important_emails']:
@@ -963,6 +738,16 @@ def main():
                             st.write(f"**⚠️ Suspicious Emails ({len(summary['details']['suspicious_emails'])})**")
                             with st.expander("View Suspicious Emails", expanded=False):
                                 for email in summary['details']['suspicious_emails'][:5]:  # Show first 5
+                                    st.write(f"• **From:** {email['from']}")
+                                    st.write(f"  **Subject:** {email['subject']}")
+                                    st.write(f"  **Time:** {email['timestamp'].strftime('%Y-%m-%d %H:%M')}")
+                                    st.write("---")
+
+                    with alert_col3:
+                        if summary['details'].get('malicious_emails'):
+                            st.write(f"**🚨 Malicious Emails ({len(summary['details']['malicious_emails'])})**")
+                            with st.expander("View Malicious Emails", expanded=False):
+                                for email in summary['details']['malicious_emails'][:5]:  # Show first 5
                                     st.write(f"• **From:** {email['from']}")
                                     st.write(f"  **Subject:** {email['subject']}")
                                     st.write(f"  **Time:** {email['timestamp'].strftime('%Y-%m-%d %H:%M')}")
@@ -1017,7 +802,7 @@ def main():
                 st.markdown("---")
                 st.subheader("📈 Summary Statistics")
 
-                stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+                stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
 
                 with stat_col1:
                     st.metric(
@@ -1046,6 +831,14 @@ def main():
                         "Peak Hour",
                         f"{peak_hour:02d}:00",
                         delta=f"{peak_count} emails"
+                    )
+
+                with stat_col5:
+                    malicious_count = len(summary['details'].get('malicious_emails', []))
+                    st.metric(
+                        "Malicious",
+                        malicious_count,
+                        delta="🚨" if malicious_count > 0 else "✅"
                     )
             else:
                 st.info("No emails found in the selected date range.")
@@ -1096,14 +889,14 @@ def main():
         if should_check:
             # Process emails automatically
             try:
-                new_emails = run_async_function(agent.process_new_emails())
+                new_emails = run_async_function(process_emails_for_streamlit())
                 if new_emails:
                     st.toast(f"📧 {len(new_emails)} new emails detected!")
             except Exception as e:
-                agent.add_log(f"Auto-check error: {str(e)}")
+                add_log(f"Auto-check error: {str(e)}")
 
             # Rerun to update the display
-            time.sleep(2)  # Brief pause before rerun
+            time.sleep(5)  # Brief pause before rerun
             st.rerun()
         else:
             # Show countdown and auto-refresh
