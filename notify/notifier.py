@@ -13,12 +13,9 @@ class TwilioNotifier:
 
         # Load environment variables from config directory
         from pathlib import Path
+        BASE_DIR = Path(__file__).resolve().parent
+        ENV_PATH = BASE_DIR.parent / 'config' / 'credentials.env'
 
-        # Get the absolute path to the credentials.env file
-        BASE_DIR = Path(__file__).resolve().parent  # current script's dir (mailAgent/notify/)
-        ENV_PATH = BASE_DIR.parent / 'config' / 'credentials.env'  # go one up, into config
-
-        # Load the .env file
         load_dotenv(ENV_PATH)
         self.logger.info(f"Loaded .env from: {ENV_PATH}")
         self._init_twilio()
@@ -30,13 +27,6 @@ class TwilioNotifier:
             self.auth_token = os.getenv('TWILIO_AUTH_TOKEN')
             self.from_number = os.getenv('TWILIO_PHONE_NUMBER')
             self.to_number = os.getenv('RECIPIENT_PHONE_NUMBER')
-
-            # Debug logging
-            self.logger.info(f"Environment variables check:")
-            self.logger.info(f"  TWILIO_ACCOUNT_SID: {'Found' if self.account_sid else 'Missing'}")
-            self.logger.info(f"  TWILIO_AUTH_TOKEN: {'Found' if self.auth_token else 'Missing'}")
-            self.logger.info(f"  TWILIO_PHONE_NUMBER: {'Found' if self.from_number else 'Missing'}")
-            self.logger.info(f"  RECIPIENT_PHONE_NUMBER: {'Found' if self.to_number else 'Missing'}")
 
             if not all([self.account_sid, self.auth_token, self.from_number, self.to_number]):
                 missing = [var for var, val in [
@@ -56,16 +46,7 @@ class TwilioNotifier:
             raise
 
     async def send_notification(self, email_data, classification):
-        """
-        Send SMS notification for important and suspicious emails only
-
-        Args:
-            email_data: Dictionary with email info (subject, from, etc.)
-            classification: String classification result from your classifier
-
-        Returns:
-            bool: True if SMS sent or not needed, False if failed
-        """
+        """Send SMS notification for important and suspicious emails only"""
         if not self.client:
             self.logger.error("Twilio client not available")
             return False
@@ -74,7 +55,7 @@ class TwilioNotifier:
         category = classification.lower()
         if category not in ['important', 'suspicious']:
             self.logger.debug(f"Skipping SMS for category: {category}")
-            return True  # Not an error, just not needed
+            return True
 
         try:
             message = self._create_message(email_data, category)
@@ -131,27 +112,3 @@ class TwilioNotifier:
         except Exception as e:
             self.logger.error(f"Test SMS failed: {e}")
             return False
-
-
-# Usage example:
-async def main():
-    notifier = TwilioNotifier()
-
-    # Example email data
-    email = {
-        'subject': 'Urgent: Server Down',
-        'from': 'admin@company.com'
-    }
-
-    # This will send SMS
-    await notifier.send_notification(email, 'important')
-
-    # This will send SMS
-    await notifier.send_notification(email, 'suspicious')
-
-    # This will NOT send SMS
-    await notifier.send_notification(email, 'newsletter')
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

@@ -9,12 +9,12 @@ from datetime import datetime, timedelta
 import pandas as pd
 from typing import List, Dict, Any
 import sys
-import html  # Add this import for HTML escaping
+import html
 from collections import Counter, defaultdict
 
-# Import your existing modules
+# Import the refactored modules
 try:
-    from email_agent import EmailMonitoringAgent  # Import the new agent
+    from core.email_agent import EmailMonitoringAgent
     from utils.helpers import setup_logging
 except ImportError as e:
     st.error(f"Import error: {e}")
@@ -24,10 +24,8 @@ except ImportError as e:
 def run_async_function(func):
     """Helper to run async functions in Streamlit"""
     try:
-        # Try to get existing event loop
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            # If loop is running, create a new thread
             import concurrent.futures
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(asyncio.run, func)
@@ -35,35 +33,31 @@ def run_async_function(func):
         else:
             return loop.run_until_complete(func)
     except RuntimeError:
-        # No event loop, create new one
         return asyncio.run(func)
 
 
 def initialize_session_state():
     """Initialize all session state variables"""
-    if 'monitoring_active' not in st.session_state:
-        st.session_state.monitoring_active = False
-    if 'emails_processed' not in st.session_state:
-        st.session_state.emails_processed = []
-    if 'last_check_time' not in st.session_state:
-        st.session_state.last_check_time = None
-    if 'total_emails' not in st.session_state:
-        st.session_state.total_emails = 0
-    if 'important_count' not in st.session_state:
-        st.session_state.important_count = 0
-    if 'suspicious_count' not in st.session_state:
-        st.session_state.suspicious_count = 0
-    if 'malicious_count' not in st.session_state:
-        st.session_state.malicious_count = 0
-    if 'log_messages' not in st.session_state:
-        st.session_state.log_messages = []
-    if 'agent' not in st.session_state:
+    defaults = {
+        'monitoring_active': False,
+        'emails_processed': [],
+        'last_check_time': None,
+        'total_emails': 0,
+        'important_count': 0,
+        'suspicious_count': 0,
+        'log_messages': [],
+        'agent': None,
+        'feedback_messages': []
+    }
+
+    for key, default_value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = default_value
+
+    # Initialize agent if not already done
+    if st.session_state.agent is None:
         with st.spinner("Initializing Email Agent..."):
-            st.session_state.agent = EmailMonitoringAgent()  # Use the new agent
-    if 'weekly_summary' not in st.session_state:
-        st.session_state.weekly_summary = None
-    if 'summary_date_range' not in st.session_state:
-        st.session_state.summary_date_range = None
+            st.session_state.agent = EmailMonitoringAgent()
 
 
 def safe_html_escape(text):
@@ -83,12 +77,25 @@ def add_log(message):
         st.session_state.log_messages = st.session_state.log_messages[-50:]
 
 
+def add_feedback_message(message, type="info"):
+    """Add a feedback message to session state"""
+    timestamp = datetime.now().strftime("%H:%M:%S")
+    st.session_state.feedback_messages.append({
+        'message': message,
+        'timestamp': timestamp,
+        'type': type
+    })
+    # Keep only last 10 feedback messages
+    if len(st.session_state.feedback_messages) > 10:
+        st.session_state.feedback_messages = st.session_state.feedback_messages[-10:]
+
+
 async def process_emails_for_streamlit():
     """Wrapper function to process emails and update Streamlit session state"""
     agent = st.session_state.agent
 
     try:
-        # Process new emails
+        add_log("Checking for new emails...")
         email_classifications = await agent.process_new_emails()
 
         if not email_classifications:
@@ -107,10 +114,13 @@ async def process_emails_for_streamlit():
                 'category': classification.get('category', 'Unknown'),
                 'confidence': classification.get('confidence', 0.0),
                 'body_preview': email.get('body', '')[:100] + '...' if email.get('body') else '',
-                'threat_intelligence': classification.get('details', {}).get('threat_intelligence'),
-                'rule_matches': classification.get('details', {}).get('rule_matches', [])
+                'details': classification.get('details', {}),
+                'email_id': email.get('id', ''),
+                'raw_email': email,
+                'raw_classification': classification
             }
             processed_emails.append(email_data)
+            add_log(f"Processed: {email_data['subject']} - {email_data['category']}")
 
             # Update counters in session state
             st.session_state.total_emails += 1
@@ -120,20 +130,265 @@ async def process_emails_for_streamlit():
             elif category == 'suspicious':
                 st.session_state.suspicious_count += 1
 
-                # Check if it's malicious based on threat intelligence
-                threat_intel = classification.get('details', {}).get('threat_intelligence')
-                if threat_intel and threat_intel.get('is_malicious', False):
-                    st.session_state.malicious_count += 1
-
         # Add to session state
         st.session_state.emails_processed.extend(processed_emails)
         st.session_state.last_check_time = datetime.now()
 
+        add_log(f"Added {len(processed_emails)} emails to UI")
         return processed_emails
 
     except Exception as e:
         add_log(f"Error in email processing: {str(e)}")
+        st.error(f"Error processing emails: {str(e)}")
         return []
+
+
+def handle_feedback(email_data, is_correct, correct_category=None):
+    """Handle user feedback on email classification"""
+    agent = st.session_state.agent
+
+    try:
+        # Get raw email and classification data
+        raw_email = email_data.get('raw_email', {})
+        raw_classification = email_data.get('raw_classification', {})
+
+        if not raw_email or not raw_classification:
+            st.error("Missing email data for feedback")
+            return False
+
+        # If correct, use the original category
+        if is_correct:
+            correct_category = raw_classification.get('category', 'normal')
+
+        # Save feedback
+        success = agent.classifier.collect_user_feedback(
+            raw_email, raw_classification, correct_category, is_correct
+        )
+
+        if success:
+            if is_correct:
+                add_feedback_message(f"✅ Classification '{email_data['category']}' marked as correct", "success")
+            else:
+                add_feedback_message(f"✅ Classification corrected to '{correct_category}'", "success")
+            return True
+        else:
+            add_feedback_message("❌ Failed to save feedback", "error")
+            return False
+
+    except Exception as e:
+        add_feedback_message(f"❌ Error saving feedback: {str(e)}", "error")
+        return False
+
+
+def render_email_card(email, index):
+    """Render a single email card with improved styling and feedback options"""
+    category = email['category'].lower()
+
+    # Define colors and icons based on category
+    if category == 'important':
+        border_color = "#ff6b6b"
+        bg_color = "#fff5f5"
+        icon = "🔥"
+        category_color = "#ff6b6b"
+    elif category == 'suspicious':
+        border_color = "#feca57"
+        bg_color = "#fffbf0"
+        icon = "⚠️"
+        category_color = "#feca57"
+    else:  # normal
+        border_color = "#48cae4"
+        bg_color = "#f0fbff"
+        icon = "📄"
+        category_color = "#48cae4"
+
+    # Safely escape HTML content
+    safe_subject = safe_html_escape(email['subject'])
+    safe_from = safe_html_escape(email['from'])
+    safe_category = safe_html_escape(email['category'])
+
+    # Create the email card
+    with st.container():
+        st.markdown(f"""
+        <div style="
+            border-left: 4px solid {border_color};
+            background-color: {bg_color};
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        ">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">
+                <div style="flex: 1;">
+                    <h4 style="margin: 0; color: #2c3e50; font-size: 16px; font-weight: 600;">
+                        {icon} {safe_subject}
+                    </h4>
+                    <p style="margin: 5px 0; color: #7f8c8d; font-size: 14px;">
+                        <strong>From:</strong> {safe_from}
+                    </p>
+                </div>
+                <div style="text-align: right; min-width: 120px;">
+                    <span style="
+                        background-color: {category_color};
+                        color: white;
+                        padding: 4px 8px;
+                        border-radius: 12px;
+                        font-size: 12px;
+                        font-weight: 600;
+                    ">
+                        {safe_category}
+                    </span>
+                    <p style="margin: 5px 0; color: #95a5a6; font-size: 12px;">
+                        {email['timestamp'].strftime("%H:%M:%S")}
+                    </p>
+                </div>
+            </div>
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div style="color: #7f8c8d; font-size: 13px;">
+                    <strong>Confidence:</strong> {email['confidence']:.1%}
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Action buttons
+        col1, col2, col3 = st.columns([1, 1, 1])
+
+        with col1:
+            if st.button("📖 Preview", key=f"preview_{index}", help="View email preview"):
+                st.session_state[f"show_preview_{index}"] = not st.session_state.get(f"show_preview_{index}", False)
+
+        with col2:
+            if st.button("📊 Details", key=f"details_{index}", help="View detailed information"):
+                st.session_state[f"show_details_{index}"] = not st.session_state.get(f"show_details_{index}", False)
+
+        with col3:
+            if category in ['important', 'suspicious'] and st.session_state.agent.notifier:
+                if st.button("📱 Send SMS", key=f"sms_{index}", help="Send SMS notification"):
+                    with st.spinner("Sending SMS..."):
+                        try:
+                            mock_email = {
+                                'from': email['from'],
+                                'subject': email['subject'],
+                                'body': email['body_preview']
+                            }
+
+                            success = run_async_function(
+                                st.session_state.agent.notifier.send_notification(mock_email, category)
+                            )
+                            if success:
+                                st.success("SMS sent!")
+                            else:
+                                st.error("SMS failed")
+                        except Exception as e:
+                            st.error(f"SMS error: {e}")
+
+        # Show preview if toggled
+        if st.session_state.get(f"show_preview_{index}", False) and email['body_preview']:
+            with st.expander("📖 Email Preview", expanded=True):
+                st.text_area(
+                    "Email Content Preview",
+                    value=email['body_preview'],
+                    height=200,
+                    key=f"preview_text_{index}",
+                    disabled=True
+                )
+
+        # Show details if toggled
+        if st.session_state.get(f"show_details_{index}", False):
+            with st.expander("📊 Detailed Information", expanded=True):
+                detail_col1, detail_col2 = st.columns(2)
+
+                with detail_col1:
+                    st.write("**Email Information:**")
+                    st.write(f"• **Sender:** {email['from']}")
+                    st.write(f"• **Subject:** {email['subject']}")
+                    st.write(f"• **Received:** {email['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+
+                with detail_col2:
+                    st.write("**Classification:**")
+                    st.write(f"• **Category:** {email['category']}")
+                    st.write(f"• **Confidence:** {email['confidence']:.2%}")
+
+                    # Show all classification scores if available
+                    details = email.get('details', {})
+                    if details.get('all_scores'):
+                        st.write("**All Scores:**")
+                        for cat, score in details.get('all_scores', {}).items():
+                            st.write(f"• {cat}: {score:.2%}")
+
+        # Feedback section
+        with st.expander("🧠 Provide Feedback", expanded=False):
+            st.write("**Is this classification correct?**")
+
+            feedback_col1, feedback_col2 = st.columns(2)
+
+            with feedback_col1:
+                if st.button("✅ Correct", key=f"correct_{index}"):
+                    if handle_feedback(email, True):
+                        st.success(f"Feedback saved: '{email['category']}' is correct")
+
+            with feedback_col2:
+                if st.button("❌ Incorrect", key=f"incorrect_{index}"):
+                    st.session_state[f"show_correction_{index}"] = True
+
+            # Show correction options if marked as incorrect
+            if st.session_state.get(f"show_correction_{index}", False):
+                st.write("**What should be the correct category?**")
+
+                correction_col1, correction_col2, correction_col3 = st.columns(3)
+
+                with correction_col1:
+                    if st.button("Normal", key=f"normal_{index}"):
+                        if handle_feedback(email, False, "normal"):
+                            st.success("Feedback saved: Corrected to 'normal'")
+                            st.session_state[f"show_correction_{index}"] = False
+
+                with correction_col2:
+                    if st.button("Important", key=f"important_{index}"):
+                        if handle_feedback(email, False, "important"):
+                            st.success("Feedback saved: Corrected to 'important'")
+                            st.session_state[f"show_correction_{index}"] = False
+
+                with correction_col3:
+                    if st.button("Suspicious", key=f"suspicious_{index}"):
+                        if handle_feedback(email, False, "suspicious"):
+                            st.success("Feedback saved: Corrected to 'suspicious'")
+                            st.session_state[f"show_correction_{index}"] = False
+
+
+def check_for_new_emails():
+    """Check if we should fetch new emails based on monitoring status and timing"""
+    agent = st.session_state.agent
+
+    # Only check if monitoring is active and fetcher is available
+    if not st.session_state.monitoring_active:
+        return False
+
+    if not agent.fetcher or not agent.fetcher.gmail_service:
+        return False
+
+    # Check if it's time for a new check
+    if st.session_state.last_check_time is None:
+        return True
+
+    time_since_last = (datetime.now() - st.session_state.last_check_time).total_seconds()
+    return time_since_last >= agent.polling_interval
+
+
+def display_status_bar():
+    """Display status bar with time until next check"""
+    agent = st.session_state.agent
+
+    if not st.session_state.last_check_time:
+        return
+
+    time_since_last = (datetime.now() - st.session_state.last_check_time).total_seconds()
+    time_remaining = max(0, agent.polling_interval - time_since_last)
+
+    with st.container():
+        st.write(f"⏰ Next check in {int(time_remaining)} seconds...")
+        progress = min(1.0, time_since_last / agent.polling_interval)
+        st.progress(progress)
 
 
 def main():
@@ -150,19 +405,20 @@ def main():
 
     # Title and header
     st.title("📧 Email Monitoring Agent")
+    st.markdown("*Powered by Zero-Shot Classification with Active Learning*")
     st.markdown("---")
 
-    # Check if agent components are available
+    # Check component status
     components_status = []
-    if agent.fetcher:
-        components_status.append("✅ Email Fetcher")
+    if agent.fetcher and agent.fetcher.gmail_service:
+        components_status.append("✅ Gmail Fetcher")
     else:
-        components_status.append("❌ Email Fetcher")
+        components_status.append("❌ Gmail Fetcher")
 
-    if agent.classifier:
-        components_status.append("✅ ML Classifier")
+    if agent.classifier and agent.classifier.classifier:
+        components_status.append("✅ Zero-Shot Classifier")
     else:
-        components_status.append("⚠️ Basic Classifier")
+        components_status.append("❌ Zero-Shot Classifier")
 
     if agent.notifier:
         components_status.append("✅ SMS Notifier")
@@ -194,14 +450,14 @@ def main():
             else:
                 st.warning("📱 SMS OFF")
 
-        # Control buttons
         st.markdown("---")
 
+        # Control buttons
         col1, col2 = st.columns(2)
         with col1:
             if st.button("▶️ Start"):
-                if not agent.fetcher:
-                    st.error("Email fetcher not available!")
+                if not agent.fetcher or not agent.fetcher.gmail_service:
+                    st.error("Gmail fetcher not available!")
                 else:
                     st.session_state.monitoring_active = True
                     agent.monitoring_active = True
@@ -217,17 +473,18 @@ def main():
 
         # Manual check
         if st.button("🔍 Check Now"):
-            if not agent.fetcher:
-                st.error("Email fetcher not available!")
+            if not agent.fetcher or not agent.fetcher.gmail_service:
+                st.error("Gmail fetcher not available!")
             else:
                 with st.spinner("Checking for new emails..."):
                     try:
                         new_emails = run_async_function(process_emails_for_streamlit())
                         if new_emails:
                             st.success(f"Found {len(new_emails)} new emails!")
+                            # Force rerun to update UI immediately
+                            st.rerun()
                         else:
                             st.info("No new emails found")
-                        st.rerun()
                     except Exception as e:
                         st.error(f"Error checking emails: {e}")
 
@@ -246,7 +503,33 @@ def main():
             else:
                 st.error("SMS not configured")
 
-        # Settings
+        st.markdown("---")
+        st.subheader("🧠 Learning System")
+
+        # Display learning stats
+        learning_stats = agent.classifier.get_learning_stats()
+
+        st.write(f"**Model Version:** v{learning_stats['model_version']}")
+        st.write(f"**Model Trained:** {'Yes ✅' if learning_stats['is_trained'] else 'No ❌'}")
+
+        feedback_stats = learning_stats.get('feedback_stats', {})
+        if feedback_stats:
+            st.write(f"**Total Feedback:** {feedback_stats.get('total_feedback', 0)}")
+            st.write(f"**Training Examples:** {feedback_stats.get('training_examples', 0)}")
+            st.write(f"**Overall Accuracy:** {feedback_stats.get('overall_accuracy', 0):.1f}%")
+
+        # Retrain button
+        if st.button("🔄 Retrain Model"):
+            with st.spinner("Retraining model..."):
+                try:
+                    success = agent.classifier.active_learner.retrain_model()
+                    if success:
+                        st.success("Model retrained successfully!")
+                    else:
+                        st.warning("Not enough training data for retraining")
+                except Exception as e:
+                    st.error(f"Error retraining model: {e}")
+
         st.markdown("---")
         st.subheader("⚙️ Settings")
 
@@ -270,17 +553,16 @@ def main():
             st.session_state.total_emails = 0
             st.session_state.important_count = 0
             st.session_state.suspicious_count = 0
-            st.session_state.malicious_count = 0
-            agent.clear_data()  # Also clear data in the agent
+            agent.clear_data()
             st.success("Data cleared!")
             st.rerun()
 
     # Main content area with tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📧 Email List", "📈 Weekly Summary", "📝 Logs"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "📧 Email List", "🧠 Learning", "📝 Logs"])
 
     with tab1:
         # Statistics
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4 = st.columns(4)
 
         with col1:
             st.metric("Total Emails", st.session_state.total_emails)
@@ -292,9 +574,6 @@ def main():
             st.metric("Suspicious", st.session_state.suspicious_count)
 
         with col4:
-            st.metric("Malicious", st.session_state.malicious_count)
-
-        with col5:
             if st.session_state.last_check_time:
                 time_diff = datetime.now() - st.session_state.last_check_time
                 st.metric("Last Check", f"{int(time_diff.total_seconds())}s ago")
@@ -322,27 +601,6 @@ def main():
                     st.line_chart(hourly_counts)
                 else:
                     st.info("Need more emails for timeline chart")
-
-            # Threat Intelligence Summary
-            threat_summary = agent.get_threat_summary()
-            if threat_summary:
-                st.subheader("🛡️ Threat Intelligence Summary")
-
-                threat_col1, threat_col2, threat_col3 = st.columns(3)
-
-                with threat_col1:
-                    st.metric("Analyzed", threat_summary['total_analyzed'])
-
-                with threat_col2:
-                    st.metric("Malicious", threat_summary['malicious_count'])
-
-                with threat_col3:
-                    st.metric("Suspicious", threat_summary['suspicious_count'])
-
-                if threat_summary['threat_indicators']:
-                    st.write("**Top Threat Indicators:**")
-                    for indicator, count in threat_summary['threat_indicators']:
-                        st.write(f"• {indicator}: {count}")
         else:
             st.info("📭 No emails processed yet. Start monitoring or check manually to see analytics.")
 
@@ -352,11 +610,9 @@ def main():
         with col1:
             st.subheader("📧 Email Inbox")
         with col2:
-            # Filter by category
             categories = ['All'] + list(set([email['category'] for email in st.session_state.emails_processed]))
             selected_category = st.selectbox("Filter by Category", categories, key="category_filter")
         with col3:
-            # Sort options
             sort_option = st.selectbox("Sort by", ["Newest First", "Oldest First", "Category", "Sender"],
                                        key="sort_option")
 
@@ -379,164 +635,11 @@ def main():
             # Show email count
             st.write(f"Showing {len(filtered_emails)} of {len(st.session_state.emails_processed)} emails")
 
-            # Display emails with improved UI
+            # Display emails
             for i, email in enumerate(filtered_emails):
-                # Create a card-like container with better styling
-                category = email['category'].lower()
-
-                # Define colors and icons based on category
-                if category == 'important':
-                    border_color = "#ff6b6b"
-                    bg_color = "#fff5f5"
-                    icon = "🔥"
-                    category_color = "#ff6b6b"
-                elif category == 'suspicious':
-                    border_color = "#feca57"
-                    bg_color = "#fffbf0"
-                    icon = "⚠️"
-                    category_color = "#feca57"
-                else:
-                    border_color = "#48cae4"
-                    bg_color = "#f0fbff"
-                    icon = "📄"
-                    category_color = "#48cae4"
-
-                # Check for malicious threat intelligence
-                threat_intel = email.get('threat_intelligence')
-                if threat_intel and threat_intel.get('is_malicious', False):
-                    border_color = "#dc3545"
-                    bg_color = "#f8d7da"
-                    icon = "🚨"
-                    category_color = "#dc3545"
-
-                # Safely escape HTML content
-                safe_subject = safe_html_escape(email['subject'])
-                safe_from = safe_html_escape(email['from'])
-                safe_category = safe_html_escape(email['category'])
-
-                # Create the email card
-                with st.container():
-                    # Use HTML/CSS for better styling with escaped content
-                    st.markdown(f"""
-                    <div style="
-                        border-left: 4px solid {border_color};
-                        background-color: {bg_color};
-                        padding: 15px;
-                        margin: 10px 0;
-                        border-radius: 8px;
-                        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-                    ">
-                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px;">
-                            <div style="flex: 1;">
-                                <h4 style="margin: 0; color: #2c3e50; font-size: 16px; font-weight: 600;">
-                                    {icon} {safe_subject}
-                                </h4>
-                                <p style="margin: 5px 0; color: #7f8c8d; font-size: 14px;">
-                                    <strong>From:</strong> {safe_from}
-                                </p>
-                            </div>
-                            <div style="text-align: right; min-width: 120px;">
-                                <span style="
-                                    background-color: {category_color};
-                                    color: white;
-                                    padding: 4px 8px;
-                                    border-radius: 12px;
-                                    font-size: 12px;
-                                    font-weight: 600;
-                                ">
-                                    {safe_category}
-                                </span>
-                                <p style="margin: 5px 0; color: #95a5a6; font-size: 12px;">
-                                    {email['timestamp'].strftime("%H:%M:%S")}
-                                </p>
-                            </div>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center;">
-                            <div style="color: #7f8c8d; font-size: 13px;">
-                                <strong>Confidence:</strong> {email['confidence']:.1%}
-                            </div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                    # Expandable sections
-                    col1, col2, col3 = st.columns([1, 1, 1])
-
-                    with col1:
-                        if st.button("📖 Preview", key=f"preview_{i}", help="View email preview"):
-                            st.session_state[f"show_preview_{i}"] = not st.session_state.get(f"show_preview_{i}", False)
-
-                    with col2:
-                        if st.button("📊 Details", key=f"details_{i}", help="View detailed information"):
-                            st.session_state[f"show_details_{i}"] = not st.session_state.get(f"show_details_{i}", False)
-
-                    with col3:
-                        if category in ['important', 'suspicious'] and agent.notifier:
-                            if st.button("📱 Resend SMS", key=f"sms_{i}", help="Resend SMS notification"):
-                                with st.spinner("Sending SMS..."):
-                                    try:
-                                        # Create a mock email object for notification
-                                        mock_email = {
-                                            'from': email['from'],
-                                            'subject': email['subject'],
-                                            'body': email['body_preview']
-                                        }
-
-                                        # Determine notification type
-                                        notification_type = category
-                                        if threat_intel and threat_intel.get('is_malicious', False):
-                                            notification_type = 'malicious'
-
-                                        success = run_async_function(
-                                            agent.notifier.send_notification(mock_email, notification_type)
-                                        )
-                                        if success:
-                                            st.success("SMS sent!")
-                                        else:
-                                            st.error("SMS failed")
-                                    except Exception as e:
-                                        st.error(f"SMS error: {e}")
-
-                    # Show preview if toggled
-                    if st.session_state.get(f"show_preview_{i}", False) and email['body_preview']:
-                        with st.expander("📖 Email Preview", expanded=True):
-                            # Use safe text display instead of HTML
-                            st.text_area(
-                                "Email Content Preview",
-                                value=email['body_preview'],
-                                height=200,
-                                key=f"preview_text_{i}",
-                                disabled=True
-                            )
-
-                    # Show details if toggled
-                    if st.session_state.get(f"show_details_{i}", False):
-                        with st.expander("📊 Detailed Information", expanded=True):
-                            detail_col1, detail_col2 = st.columns(2)
-
-                            with detail_col1:
-                                st.write("**Email Information:**")
-                                st.write(f"• **Sender:** {email['from']}")
-                                st.write(f"• **Subject:** {email['subject']}")
-                                st.write(f"• **Received:** {email['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
-
-                            with detail_col2:
-                                st.write("**Classification:**")
-                                st.write(f"• **Category:** {email['category']}")
-                                st.write(f"• **Confidence:** {email['confidence']:.2%}")
-
-                                # Show threat intelligence if available
-                                if threat_intel:
-                                    st.write("**Threat Intelligence:**")
-                                    st.write(
-                                        f"• **Malicious:** {'Yes' if threat_intel.get('is_malicious', False) else 'No'}")
-                                    st.write(f"• **Risk Score:** {threat_intel.get('risk_score', 0.0):.2f}")
-                                    if threat_intel.get('threat_indicators'):
-                                        st.write(f"• **Indicators:** {', '.join(threat_intel['threat_indicators'])}")
-
-                    st.markdown("<br>", unsafe_allow_html=True)
+                render_email_card(email, i)
         else:
-            # Empty state with better design
+            # Empty state
             st.markdown("""
             <div style="
                 text-align: center;
@@ -559,359 +662,103 @@ def main():
             """, unsafe_allow_html=True)
 
     with tab3:
-        st.subheader("📈 Weekly Email Summary")
+        st.subheader("🧠 Learning System")
 
-        # Date range selector
-        col1, col2, col3 = st.columns([2, 2, 1])
+        # Learning stats
+        learning_stats = agent.classifier.get_learning_stats()
+        feedback_stats = learning_stats.get('feedback_stats', {})
+
+        col1, col2 = st.columns(2)
 
         with col1:
-            # Default to last week
-            default_start = datetime.now() - timedelta(days=7)
-            start_date = st.date_input(
-                "Start Date",
-                value=default_start.date(),
-                max_value=datetime.now().date(),
-                help="Select the start date for the weekly summary"
-            )
+            st.write("### Model Information")
+            st.write(f"**Model Version:** v{learning_stats['model_version']}")
+            st.write(f"**Model Trained:** {'Yes ✅' if learning_stats['is_trained'] else 'No ❌'}")
+            st.write(f"**Available Training Data:** {learning_stats.get('available_training_data', 0)}")
+
+            if feedback_stats:
+                st.write(f"**Total Feedback:** {feedback_stats.get('total_feedback', 0)}")
+                st.write(f"**Training Examples:** {feedback_stats.get('training_examples', 0)}")
 
         with col2:
-            # End date (7 days after start)
-            end_date = st.date_input(
-                "End Date",
-                value=(datetime.combine(start_date, datetime.min.time()) + timedelta(days=7)).date(),
-                max_value=datetime.now().date(),
-                help="Select the end date for the weekly summary"
-            )
+            st.write("### Accuracy Metrics")
 
-        with col3:
-            if st.button("📊 Generate Summary", type="primary"):
-                if start_date and end_date:
-                    start_datetime = datetime.combine(start_date, datetime.min.time())
+            if feedback_stats and feedback_stats.get('total_feedback', 0) > 0:
+                st.write(f"**Overall Accuracy:** {feedback_stats.get('overall_accuracy', 0):.1f}%")
 
-                    with st.spinner("Generating weekly summary..."):
-                        summary = agent.generate_weekly_summary(
-                            st.session_state.emails_processed,
-                            start_datetime
-                        )
-                        st.session_state.weekly_summary = summary
-                        st.session_state.summary_date_range = (start_date, end_date)
+                # Category accuracy
+                st.write("**Category Accuracy:**")
+                for category, cat_stats in feedback_stats.get('category_stats', {}).items():
+                    accuracy = cat_stats.get('accuracy', 0)
+                    correct = cat_stats.get('correct', 0)
+                    total = cat_stats.get('total', 0)
 
-                    if summary['total_emails'] > 0:
-                        st.success(f"Summary generated for {summary['total_emails']} emails!")
+                    # Color based on accuracy
+                    if accuracy >= 80:
+                        color = "green"
+                    elif accuracy >= 60:
+                        color = "orange"
                     else:
-                        st.info("No emails found in the selected date range.")
+                        color = "red"
+
+                    st.markdown(
+                        f"- **{category}**: <span style='color:{color}'>{accuracy:.1f}%</span> ({correct}/{total})",
+                        unsafe_allow_html=True)
+            else:
+                st.info(
+                    "No feedback data available yet. Provide feedback on email classifications to improve the model.")
+
+        # Recent feedback
+        st.write("### Recent Feedback")
+
+        if st.session_state.feedback_messages:
+            for msg in reversed(st.session_state.feedback_messages):
+                if msg['type'] == "success":
+                    st.success(f"[{msg['timestamp']}] {msg['message']}")
+                elif msg['type'] == "error":
+                    st.error(f"[{msg['timestamp']}] {msg['message']}")
                 else:
-                    st.error("Please select both start and end dates.")
-
-        # Quick date range buttons
-        st.write("**Quick Select:**")
-        quick_col1, quick_col2, quick_col3, quick_col4 = st.columns(4)
-
-        with quick_col1:
-            if st.button("📅 Last 7 Days"):
-                st.session_state.summary_date_range = (
-                    (datetime.now() - timedelta(days=7)).date(),
-                    datetime.now().date()
-                )
-                summary = agent.generate_weekly_summary(
-                    st.session_state.emails_processed,
-                    datetime.now() - timedelta(days=7)
-                )
-                st.session_state.weekly_summary = summary
-                st.rerun()
-
-        with quick_col2:
-            if st.button("📅 This Week"):
-                # Get Monday of current week
-                today = datetime.now()
-                monday = today - timedelta(days=today.weekday())
-                st.session_state.summary_date_range = (monday.date(), today.date())
-                summary = agent.generate_weekly_summary(
-                    st.session_state.emails_processed,
-                    monday
-                )
-                st.session_state.weekly_summary = summary
-                st.rerun()
-
-        with quick_col3:
-            if st.button("📅 Last Week"):
-                today = datetime.now()
-                last_monday = today - timedelta(days=today.weekday() + 7)
-                last_sunday = last_monday + timedelta(days=6)
-                st.session_state.summary_date_range = (last_monday.date(), last_sunday.date())
-                summary = agent.generate_weekly_summary(
-                    st.session_state.emails_processed,
-                    last_monday
-                )
-                st.session_state.weekly_summary = summary
-                st.rerun()
-
-        with quick_col4:
-            if st.button("📅 Last 30 Days"):
-                start_30 = datetime.now() - timedelta(days=30)
-                st.session_state.summary_date_range = (start_30.date(), datetime.now().date())
-                summary = agent.generate_weekly_summary(
-                    st.session_state.emails_processed,
-                    start_30
-                )
-                st.session_state.weekly_summary = summary
-                st.rerun()
-
-        st.markdown("---")
-
-        # Display summary if available
-        if st.session_state.weekly_summary:
-            summary = st.session_state.weekly_summary
-
-            if summary['total_emails'] > 0:
-                # Summary text
-                st.markdown(summary['summary'])
-
-                st.markdown("---")
-
-                # Detailed analytics
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.subheader("📊 Category Distribution")
-                    if summary['details']['category_counts']:
-                        category_df = pd.DataFrame(
-                            list(summary['details']['category_counts'].items()),
-                            columns=['Category', 'Count']
-                        )
-                        st.bar_chart(category_df.set_index('Category'))
-                    else:
-                        st.info("No category data available")
-
-                    st.subheader("📅 Daily Activity")
-                    if summary['details']['daily_counts']:
-                        daily_df = pd.DataFrame(
-                            list(summary['details']['daily_counts'].items()),
-                            columns=['Date', 'Emails']
-                        )
-                        daily_df['Date'] = pd.to_datetime(daily_df['Date'])
-                        daily_df = daily_df.sort_values('Date')
-                        st.line_chart(daily_df.set_index('Date'))
-                    else:
-                        st.info("No daily data available")
-
-                with col2:
-                    st.subheader("⏰ Hourly Distribution")
-                    if summary['details']['hourly_distribution']:
-                        hourly_df = pd.DataFrame(
-                            list(summary['details']['hourly_distribution'].items()),
-                            columns=['Hour', 'Emails']
-                        )
-                        hourly_df = hourly_df.sort_values('Hour')
-                        st.bar_chart(hourly_df.set_index('Hour'))
-                    else:
-                        st.info("No hourly data available")
-
-                    st.subheader("👥 Top Senders")
-                    if summary['details']['top_senders']:
-                        for i, (sender, count) in enumerate(summary['details']['top_senders'], 1):
-                            st.write(f"{i}. **{sender}** ({count} emails)")
-                    else:
-                        st.info("No sender data available")
-
-                # Important, Suspicious, and Malicious emails sections
-                if (summary['details']['important_emails'] or
-                        summary['details']['suspicious_emails'] or
-                        summary['details'].get('malicious_emails')):
-                    st.markdown("---")
-                    st.subheader("🔍 Attention Required")
-
-                    alert_col1, alert_col2, alert_col3 = st.columns(3)
-
-                    with alert_col1:
-                        if summary['details']['important_emails']:
-                            st.write(f"**🔥 Important Emails ({len(summary['details']['important_emails'])})**")
-                            with st.expander("View Important Emails", expanded=False):
-                                for email in summary['details']['important_emails'][:5]:  # Show first 5
-                                    st.write(f"• **From:** {email['from']}")
-                                    st.write(f"  **Subject:** {email['subject']}")
-                                    st.write(f"  **Time:** {email['timestamp'].strftime('%Y-%m-%d %H:%M')}")
-                                    st.write("---")
-
-                    with alert_col2:
-                        if summary['details']['suspicious_emails']:
-                            st.write(f"**⚠️ Suspicious Emails ({len(summary['details']['suspicious_emails'])})**")
-                            with st.expander("View Suspicious Emails", expanded=False):
-                                for email in summary['details']['suspicious_emails'][:5]:  # Show first 5
-                                    st.write(f"• **From:** {email['from']}")
-                                    st.write(f"  **Subject:** {email['subject']}")
-                                    st.write(f"  **Time:** {email['timestamp'].strftime('%Y-%m-%d %H:%M')}")
-                                    st.write("---")
-
-                    with alert_col3:
-                        if summary['details'].get('malicious_emails'):
-                            st.write(f"**🚨 Malicious Emails ({len(summary['details']['malicious_emails'])})**")
-                            with st.expander("View Malicious Emails", expanded=False):
-                                for email in summary['details']['malicious_emails'][:5]:  # Show first 5
-                                    st.write(f"• **From:** {email['from']}")
-                                    st.write(f"  **Subject:** {email['subject']}")
-                                    st.write(f"  **Time:** {email['timestamp'].strftime('%Y-%m-%d %H:%M')}")
-                                    st.write("---")
-
-                # Export options
-                st.markdown("---")
-                st.subheader("📤 Export Options")
-
-                export_col1, export_col2, export_col3 = st.columns(3)
-
-                with export_col1:
-                    if st.button("📋 Copy Summary"):
-                        # Create a simplified text version
-                        text_summary = summary['summary'].replace('**', '').replace('*', '')
-                        st.text_area(
-                            "Copy this summary:",
-                            value=text_summary,
-                            height=200,
-                            key="copy_summary"
-                        )
-
-                with export_col2:
-                    if st.button("📊 Download CSV"):
-                        csv_data = agent.export_weekly_summary_csv(summary, st.session_state.emails_processed)
-                        if csv_data is not None:
-                            csv_string = csv_data.to_csv(index=False)
-                            st.download_button(
-                                label="💾 Download Email Data",
-                                data=csv_string,
-                                file_name=f"email_summary_{start_date}_to_{end_date}.csv",
-                                mime="text/csv"
-                            )
-                        else:
-                            st.error("No data available for export")
-
-                with export_col3:
-                    if st.button("📧 Email Summary"):
-                        if agent.notifier:
-                            # Send summary via SMS (truncated version)
-                            short_summary = f"📊 Email Summary: {summary['total_emails']} emails processed. "
-                            if summary['details']['category_counts']:
-                                categories = ", ".join(
-                                    [f"{k}: {v}" for k, v in summary['details']['category_counts'].items()])
-                                short_summary += f"Categories: {categories}. "
-
-                            st.info("SMS summary feature would send: " + short_summary[:160] + "...")
-                        else:
-                            st.error("SMS notifications not configured")
-
-                # Statistics cards
-                st.markdown("---")
-                st.subheader("📈 Summary Statistics")
-
-                stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
-
-                with stat_col1:
-                    st.metric(
-                        "Total Emails",
-                        summary['total_emails']
-                    )
-
-                with stat_col2:
-                    st.metric(
-                        "Avg Confidence",
-                        f"{summary['details']['avg_confidence']:.1%}"
-                    )
-
-                with stat_col3:
-                    high_conf = summary['details']['high_confidence_count']
-                    st.metric(
-                        "High Confidence",
-                        high_conf,
-                        delta=f"{(high_conf / summary['total_emails'] * 100):.1f}%" if summary[
-                                                                                           'total_emails'] > 0 else "0%"
-                    )
-
-                with stat_col4:
-                    peak_hour, peak_count = summary['details']['peak_hour']
-                    st.metric(
-                        "Peak Hour",
-                        f"{peak_hour:02d}:00",
-                        delta=f"{peak_count} emails"
-                    )
-
-                with stat_col5:
-                    malicious_count = len(summary['details'].get('malicious_emails', []))
-                    st.metric(
-                        "Malicious",
-                        malicious_count,
-                        delta="🚨" if malicious_count > 0 else "✅"
-                    )
-            else:
-                st.info("No emails found in the selected date range.")
+                    st.info(f"[{msg['timestamp']}] {msg['message']}")
         else:
-            # First time user guidance
-            st.info("👆 Select a date range and click 'Generate Summary' to see your weekly email analytics.")
-
-            if st.session_state.emails_processed:
-                # Show some basic stats to encourage usage
-                st.write("**Available Data:**")
-                total_emails = len(st.session_state.emails_processed)
-                if total_emails > 0:
-                    earliest = min(email['timestamp'] for email in st.session_state.emails_processed)
-                    latest = max(email['timestamp'] for email in st.session_state.emails_processed)
-                    st.write(f"• {total_emails} emails processed")
-                    st.write(f"• Date range: {earliest.strftime('%Y-%m-%d')} to {latest.strftime('%Y-%m-%d')}")
-
-                    # Quick stats
-                    categories = Counter(email['category'] for email in st.session_state.emails_processed)
-                    st.write("• Categories:", ", ".join([f"{k}: {v}" for k, v in categories.items()]))
-            else:
-                st.write("Start monitoring emails to generate summaries!")
+            st.info("No feedback provided yet.")
 
     with tab4:
         st.subheader("📝 Activity Logs")
 
         if st.session_state.log_messages:
-            # Create a container for logs with scrolling
             log_container = st.container()
             with log_container:
-                # Display logs in reverse order (newest first)
-                for log_msg in reversed(st.session_state.log_messages[-20:]):  # Show last 20
+                for log_msg in reversed(st.session_state.log_messages[-20:]):
                     st.text(log_msg)
         else:
             st.info("No log messages yet.")
 
-    # Auto-refresh functionality
-    if st.session_state.monitoring_active and agent.fetcher:
-        # Check if it's time for the next poll
-        should_check = False
+    # Auto-refresh functionality - completely restructured
+    # Check if we should fetch new emails
+    should_check_emails = check_for_new_emails()
 
-        if st.session_state.last_check_time is None:
-            should_check = True
-        else:
-            time_since_last = (datetime.now() - st.session_state.last_check_time).total_seconds()
-            should_check = time_since_last >= agent.polling_interval
-
-        if should_check:
-            # Process emails automatically
-            try:
+    if should_check_emails:
+        try:
+            with st.spinner("Checking for new emails..."):
                 new_emails = run_async_function(process_emails_for_streamlit())
                 if new_emails:
                     st.toast(f"📧 {len(new_emails)} new emails detected!")
-            except Exception as e:
-                add_log(f"Auto-check error: {str(e)}")
+                    # Force rerun to update UI
+                    st.rerun()
+        except Exception as e:
+            add_log(f"Auto-check error: {str(e)}")
+            st.error(f"Auto-check error: {str(e)}")
 
-            # Rerun to update the display
-            time.sleep(5)  # Brief pause before rerun
-            st.rerun()
-        else:
-            # Show countdown and auto-refresh
-            time_since_last = (datetime.now() - st.session_state.last_check_time).total_seconds()
-            time_remaining = agent.polling_interval - time_since_last
+        # Shorter sleep before rerun
+        time.sleep(2)
+        st.rerun()
+    else:
+        # Display status bar with time until next check
+        display_status_bar()
 
-            # Add a status bar at the bottom
-            with st.container():
-                st.write(f"⏰ Next check in {int(time_remaining)} seconds...")
-                progress = time_since_last / agent.polling_interval
-                st.progress(progress)
-
-            # Auto-refresh every 5 seconds to update countdown
-            time.sleep(5)
-            st.rerun()
+        # Auto-refresh every 5 seconds to update countdown
+        time.sleep(5)
+        st.rerun()
 
 
 if __name__ == "__main__":
