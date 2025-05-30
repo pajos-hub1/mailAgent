@@ -7,6 +7,7 @@ from datetime import datetime
 from api.models.system import SystemHealth
 from api.core.dependencies import get_agent_optional
 
+
 router = APIRouter(tags=["Health"])
 
 

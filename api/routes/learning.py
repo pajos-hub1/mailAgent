@@ -8,13 +8,14 @@ from api.models.feedback import FeedbackRequest, FeedbackResponse
 from api.core.dependencies import get_agent
 from core.email_agent import EmailMonitoringAgent
 
+
 router = APIRouter(prefix="/learning", tags=["Learning & Feedback"])
 
 
 @router.post("/feedback", response_model=FeedbackResponse)
 async def submit_feedback(
-        feedback: FeedbackRequest,
-        agent: EmailMonitoringAgent = Depends(get_agent)
+    feedback: FeedbackRequest,
+    agent: EmailMonitoringAgent = Depends(get_agent)
 ):
     """Submit user feedback for learning"""
     try:
@@ -76,8 +77,8 @@ async def get_learning_stats(agent: EmailMonitoringAgent = Depends(get_agent)):
 
 @router.post("/retrain", response_model=RetrainResponse)
 async def retrain_model(
-        request: RetrainRequest,
-        agent: EmailMonitoringAgent = Depends(get_agent)
+    request: RetrainRequest,
+    agent: EmailMonitoringAgent = Depends(get_agent)
 ):
     """Retrain the learning model"""
     try:

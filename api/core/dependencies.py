@@ -7,6 +7,7 @@ import logging
 
 from core.email_agent import EmailMonitoringAgent
 
+
 # Global agent instance
 _agent: Optional[EmailMonitoringAgent] = None
 logger = logging.getLogger(__name__)

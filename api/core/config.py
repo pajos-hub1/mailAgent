@@ -1,7 +1,7 @@
 """
 Application configuration
 """
-from pydantic_settings import BaseSettings
+from pydantic import BaseSettings
 from typing import List, Optional
 import os
 

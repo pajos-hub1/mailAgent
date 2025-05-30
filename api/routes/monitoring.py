@@ -14,6 +14,7 @@ from api.core.dependencies import get_agent
 from api.core.lifespan import get_monitoring_task, set_monitoring_task
 from core.email_agent import EmailMonitoringAgent
 
+
 router = APIRouter(prefix="/monitoring", tags=["Monitoring Control"])
 
 
@@ -132,8 +133,8 @@ async def get_monitoring_status(agent: EmailMonitoringAgent = Depends(get_agent)
 
 @router.put("/polling-interval", response_model=PollingIntervalResponse)
 async def update_polling_interval(
-        request: PollingIntervalRequest,
-        agent: EmailMonitoringAgent = Depends(get_agent)
+    request: PollingIntervalRequest,
+    agent: EmailMonitoringAgent = Depends(get_agent)
 ):
     """Update polling interval"""
     try:

@@ -4,14 +4,13 @@ Application lifespan management
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional
-
 from fastapi import FastAPI
 
 from core.email_agent import EmailMonitoringAgent
 from utils.helpers import setup_logging
 from api.core.dependencies import set_agent
 from api.core.config import settings
+
 
 logger = logging.getLogger(__name__)
 monitoring_task: Optional[asyncio.Task] = None

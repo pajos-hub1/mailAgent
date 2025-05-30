@@ -13,6 +13,7 @@ from api.models.email import (
 from api.core.dependencies import get_agent
 from core.email_agent import EmailMonitoringAgent
 
+
 router = APIRouter(prefix="/emails", tags=["Email Processing"])
 
 
@@ -52,8 +53,8 @@ async def check_emails(agent: EmailMonitoringAgent = Depends(get_agent)):
 
 @router.post("/classify", response_model=ClassificationResult)
 async def classify_email(
-        email_request: EmailClassifyRequest,
-        agent: EmailMonitoringAgent = Depends(get_agent)
+    email_request: EmailClassifyRequest,
+    agent: EmailMonitoringAgent = Depends(get_agent)
 ):
     """Classify a single email"""
     try:
@@ -82,9 +83,9 @@ async def classify_email(
 
 @router.get("/recent", response_model=RecentEmailsResponse)
 async def get_recent_emails(
-        limit: int = 10,
-        category: Optional[str] = None,
-        agent: EmailMonitoringAgent = Depends(get_agent)
+    limit: int = 10,
+    category: Optional[str] = None,
+    agent: EmailMonitoringAgent = Depends(get_agent)
 ):
     """Get recent processed emails"""
     try:

@@ -7,6 +7,7 @@ from api.models.system import SMSTestResponse
 from api.core.dependencies import get_agent
 from core.email_agent import EmailMonitoringAgent
 
+
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
 

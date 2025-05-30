@@ -39,8 +39,10 @@ class EmailFetcher:
         creds = None
 
         # The file token.json stores the user's access and refresh tokens
-        token_path = 'gmail_token.json'
-        credentials_path = 'gmail_credentials.json'
+        from pathlib import Path
+        BASE_DIR = Path(__file__).resolve().parent.parent
+        token_path = BASE_DIR / 'config' / 'gmail_token.json'
+        credentials_path = BASE_DIR / 'config' / 'gmail_credentials.json'
 
         # Try to load existing credentials
         if os.path.exists(token_path):

@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from core.email_agent import EmailMonitoringAgent
 from utils.helpers import setup_logging
 
+
 # Global agent instance
 agent: Optional[EmailMonitoringAgent] = None
 monitoring_task: Optional[asyncio.Task] = None
@@ -152,8 +153,8 @@ async def health_check():
 # Email classification endpoint
 @app.post("/emails/classify", response_model=ClassificationResponse)
 async def classify_email(
-        email_request: EmailClassifyRequest,
-        agent: EmailMonitoringAgent = Depends(get_agent)
+    email_request: EmailClassifyRequest,
+    agent: EmailMonitoringAgent = Depends(get_agent)
 ):
     """Classify a single email"""
     try:
@@ -194,8 +195,7 @@ async def check_emails(agent: EmailMonitoringAgent = Depends(get_agent)):
                     "id": email.get('id', ''),
                     "subject": email.get('subject', ''),
                     "from": email.get('from', ''),
-                    "body": email.get('body', '')[:200] + "..." if len(email.get('body', '')) > 200 else email.get(
-                        'body', ''),
+                    "body": email.get('body', '')[:200] + "..." if len(email.get('body', '')) > 200 else email.get('body', ''),
                     "date": email.get('date', ''),
                     "timestamp": email.get('date_parsed', datetime.now()).isoformat()
                 },
@@ -307,8 +307,8 @@ async def get_learning_stats(agent: EmailMonitoringAgent = Depends(get_agent)):
 # Submit feedback
 @app.post("/learning/feedback")
 async def submit_feedback(
-        feedback: FeedbackRequest,
-        agent: EmailMonitoringAgent = Depends(get_agent)
+    feedback: FeedbackRequest,
+    agent: EmailMonitoringAgent = Depends(get_agent)
 ):
     """Submit user feedback for learning"""
     try:
@@ -377,9 +377,9 @@ async def get_model_info(agent: EmailMonitoringAgent = Depends(get_agent)):
 # Get recent emails
 @app.get("/emails/recent")
 async def get_recent_emails(
-        limit: int = 10,
-        category: Optional[str] = None,
-        agent: EmailMonitoringAgent = Depends(get_agent)
+    limit: int = 10,
+    category: Optional[str] = None,
+    agent: EmailMonitoringAgent = Depends(get_agent)
 ):
     """Get recent processed emails"""
     try:
