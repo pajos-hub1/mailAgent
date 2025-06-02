@@ -18,10 +18,10 @@ from api.routes import (
     notifications,
     analytics
 )
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, status
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Depends, status, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, conint
 from typing import List, Dict, Optional, Any
 import asyncio
 import logging
@@ -543,20 +543,18 @@ async def get_model_info(agent: EmailMonitoringAgent = Depends(get_agent)):
 
 @app.put("/config/polling-interval")
 async def update_polling_interval(
-        interval: int = Field(..., ge=10, le=3600),
-        agent: EmailMonitoringAgent = Depends(get_agent)
+    interval: conint(ge=10, le=3600) = Query(..., description="Polling interval in seconds (10-3600)"),
+    agent: EmailMonitoringAgent = Depends(get_agent)
 ):
     """Update polling interval"""
     try:
         agent.polling_interval = interval
         return {"message": f"Polling interval updated to {interval} seconds", "interval": interval}
-
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating polling interval: {str(e)}"
         )
-
 
 # Data management endpoints
 @app.delete("/data/clear")

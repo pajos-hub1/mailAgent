@@ -4,6 +4,8 @@ Application lifespan management
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from typing import Optional
+
 from fastapi import FastAPI
 
 from core.email_agent import EmailMonitoringAgent
