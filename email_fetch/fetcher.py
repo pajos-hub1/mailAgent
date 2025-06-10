@@ -30,6 +30,11 @@ class EmailFetcher:
         # Track already processed message IDs to avoid duplicates
         self.processed_ids = set()
 
+        # NEW: Track backfill progress
+        self.backfill_page_token = None
+        self.backfill_active = False
+        self.total_emails_estimate = None
+
     def _get_gmail_service(self):
         """
         Authenticate and create Gmail API service
@@ -64,35 +69,59 @@ class EmailFetcher:
 
         return build('gmail', 'v1', credentials=creds)
 
-    async def fetch_new_emails(self, max_results=20):
+    async def fetch_new_emails(self, max_results=20, backfill_batch_size=10):
         """
-        Fetch only new emails since last fetch
+        Fetch new emails with intelligent backfill strategy
 
-        :param max_results: Maximum number of emails to fetch
-        :return: List of new email dictionaries
+        Strategy:
+        1. Always check for new emails first
+        2. If no new emails found, fetch next batch of old unprocessed emails
+        3. Continue backfill until all historical emails are processed
+
+        :param max_results: Maximum number of new emails to fetch
+        :param backfill_batch_size: Number of old emails to fetch when backfilling
+        :return: List of email dictionaries
         """
         try:
-            # Determine the time range for new emails
+            # Step 1: Always check for new emails first
+            new_emails = await self._fetch_recent_emails(max_results)
+
+            if new_emails:
+                self.logger.info(f"Found {len(new_emails)} new emails")
+                return new_emails
+
+            # Step 2: No new emails found, try backfill
+            self.logger.info("No new emails found, attempting backfill of old emails")
+            backfill_emails = await self._fetch_backfill_emails(backfill_batch_size)
+
+            if backfill_emails:
+                self.logger.info(f"Backfilled {len(backfill_emails)} old emails")
+                return backfill_emails
+
+            # Step 3: No emails at all
+            self.logger.info("No new or backfill emails available")
+            return []
+
+        except Exception as e:
+            self.logger.error(f"Error in fetch_new_emails: {e}", exc_info=True)
+            return []
+
+    async def _fetch_recent_emails(self, max_results):
+        """
+        Fetch only recent new emails since last fetch
+        """
+        try:
+            # Determine query for recent emails
             if not self.last_fetch_time:
-                # If first fetch, get emails from last hour
-                query_time = datetime.now() - timedelta(hours=1)
-                self.logger.info("First fetch, getting emails from the last hour")
-
-                # Use a less restrictive query for first fetch
+                # First fetch - get emails from last hour
                 query = 'newer_than:1h'
+                self.logger.info("First fetch, getting emails from the last hour")
             else:
-                # For subsequent fetches, use a less restrictive query
-                # and rely on message ID filtering instead of date filtering
-                query_time = self.last_fetch_time
-                self.logger.info(f"Fetching emails since {query_time.isoformat()}")
+                # Subsequent fetches - get very recent emails
+                query = 'newer_than:1m'
+                self.logger.debug("Fetching emails from the last minute")
 
-                # Use a wider time window to ensure we don't miss any emails
-                # We'll filter by ID later
-                query = 'newer_than:1m'  # Get emails from the last minute
-
-            self.logger.debug(f"Using Gmail query: {query}")
-
-            # Fetch emails with higher max_results to ensure we don't miss any
+            # Fetch recent emails
             results = self.gmail_service.users().messages().list(
                 userId='me',
                 q=query,
@@ -101,52 +130,107 @@ class EmailFetcher:
 
             messages = results.get('messages', [])
 
-            # No messages found
             if not messages:
-                self.logger.info("No messages found matching the query")
                 return []
 
-            # Keep track of the current time before processing
+            # Process messages and filter by ID
+            new_emails = []
             current_time = datetime.now()
 
-            # Fetch full details for each message and filter by IDs
-            new_emails = []
             for message in messages:
-                # Skip already processed messages
                 if message['id'] in self.processed_ids:
-                    self.logger.debug(f"Skipping already processed message ID: {message['id']}")
                     continue
 
-                # Get the full message details
+                # Get full message details
                 msg = self.gmail_service.users().messages().get(
                     userId='me',
                     id=message['id'],
                     format='full'
                 ).execute()
 
-                # Parse the email and add to new emails list
+                # Parse and add to results
                 email_data = self._parse_gmail_message(msg)
                 new_emails.append(email_data)
-
-                # Add to processed IDs
                 self.processed_ids.add(message['id'])
-                self.logger.debug(f"Added new email: {email_data.get('subject')}")
 
-            # Update last fetch time to current time
-            self.last_fetch_time = current_time
-            self.logger.info(f"Updated last fetch time to {current_time.isoformat()}")
-            self.logger.info(f"Found {len(new_emails)} genuinely new emails")
-
-            # Keep the processed IDs set from growing too large (keep last 1000)
-            if len(self.processed_ids) > 1000:
-                self.logger.debug(f"Trimming processed IDs set from {len(self.processed_ids)} items")
-                self.processed_ids = set(list(self.processed_ids)[-1000:])
-                self.logger.debug(f"Processed IDs set now contains {len(self.processed_ids)} items")
+            # Update last fetch time
+            if new_emails:
+                self.last_fetch_time = current_time
+                self.logger.info(f"Updated last fetch time to {current_time.isoformat()}")
 
             return new_emails
 
         except Exception as e:
-            self.logger.error(f"Error fetching new emails: {e}", exc_info=True)
+            self.logger.error(f"Error fetching recent emails: {e}", exc_info=True)
+            return []
+
+    async def _fetch_backfill_emails(self, batch_size):
+        """
+        Fetch old emails that haven't been processed yet
+        Uses pagination to systematically work through historical emails
+        """
+        try:
+            # Build query for backfill (no time restrictions)
+            query = 'in:inbox OR in:sent'  # Adjust based on what emails you want
+
+            # Use pagination to get different batches of old emails
+            list_params = {
+                'userId': 'me',
+                'q': query,
+                'maxResults': batch_size
+            }
+
+            # Add page token if we have one (for continuing where we left off)
+            if self.backfill_page_token:
+                list_params['pageToken'] = self.backfill_page_token
+
+            results = self.gmail_service.users().messages().list(**list_params).execute()
+
+            messages = results.get('messages', [])
+            next_page_token = results.get('nextPageToken')
+
+            if not messages:
+                self.logger.info("No more emails available for backfill")
+                self.backfill_page_token = None
+                return []
+
+            # Process messages, filtering out already processed ones
+            backfill_emails = []
+
+            for message in messages:
+                if message['id'] in self.processed_ids:
+                    self.logger.debug(f"Skipping already processed email: {message['id']}")
+                    continue
+
+                # Get full message details
+                msg = self.gmail_service.users().messages().get(
+                    userId='me',
+                    id=message['id'],
+                    format='full'
+                ).execute()
+
+                # Parse and add to results
+                email_data = self._parse_gmail_message(msg)
+                backfill_emails.append(email_data)
+                self.processed_ids.add(message['id'])
+
+            # Update pagination token for next backfill
+            self.backfill_page_token = next_page_token
+
+            # If we didn't find any unprocessed emails in this batch, try next page
+            if not backfill_emails and next_page_token:
+                self.logger.debug("No unprocessed emails in current batch, trying next page")
+                return await self._fetch_backfill_emails(batch_size)
+
+            # If no next page token, we've reached the end
+            if not next_page_token:
+                self.logger.info("Reached end of email backfill")
+                self.backfill_page_token = None
+
+            return backfill_emails
+
+        except Exception as e:
+            self.logger.error(f"Error during backfill: {e}", exc_info=True)
             return []
 
     def _parse_gmail_message(self, msg):
@@ -163,7 +247,7 @@ class EmailFetcher:
         body = self._get_email_body(msg['payload'])
 
         # Get received timestamp from internalDate
-        received_timestamp = int(msg.get('internalDate', 0)) / 1000  # Convert from ms to seconds
+        received_timestamp = int(msg.get('internalDate', 0)) / 1000
         received_time = datetime.fromtimestamp(received_timestamp)
 
         # Parse date header as backup
@@ -171,7 +255,6 @@ class EmailFetcher:
         parsed_date = None
         if date_str:
             try:
-                # Parse email date format
                 parsed_time_tuple = email.utils.parsedate_tz(date_str)
                 if parsed_time_tuple:
                     parsed_date = datetime.fromtimestamp(email.utils.mktime_tz(parsed_time_tuple))
@@ -192,7 +275,8 @@ class EmailFetcher:
             'received_time': received_time,
             'body': body,
             'labels': msg.get('labelIds', []),
-            'snippet': msg.get('snippet', '')
+            'snippet': msg.get('snippet', ''),
+            'is_backfill': not self.last_fetch_time or 'backfill' in str(self.backfill_page_token or '')
         }
 
     def _get_email_body(self, payload):
@@ -207,7 +291,6 @@ class EmailFetcher:
             """Helper to decode payload"""
             import base64
             try:
-                # Try to decode base64 encoded body
                 body_data = part['body'].get('data', '')
                 return base64.urlsafe_b64decode(body_data).decode('utf-8')
             except Exception:
@@ -225,3 +308,28 @@ class EmailFetcher:
             body = decode_payload(payload)
 
         return body.strip()
+
+    def get_processing_stats(self):
+        """
+        Get statistics about processing progress
+        """
+        return {
+            'processed_emails_count': len(self.processed_ids),
+            'last_fetch_time': self.last_fetch_time.isoformat() if self.last_fetch_time else None,
+            'backfill_active': bool(self.backfill_page_token),
+            'backfill_page_token': self.backfill_page_token
+        }
+
+    def reset_backfill(self):
+        """
+        Reset backfill progress to start over
+        """
+        self.backfill_page_token = None
+        self.logger.info("Backfill progress reset")
+
+    def clear_processed_ids(self):
+        """
+        Clear processed IDs (use with caution - will cause duplicates)
+        """
+        self.processed_ids.clear()
+        self.logger.warning("Processed IDs cleared - may cause duplicate processing")
